@@ -2,17 +2,15 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-private let inkTint = Color(red: 0.86, green: 0.72, blue: 0.46)
-
 @main
 struct CopyrightInserterApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .tint(inkTint)
         }
-        .defaultSize(width: 1120, height: 760)
+        .defaultSize(width: 1100, height: 740)
         .windowResizability(.contentMinSize)
+        .windowToolbarStyle(.unified)
     }
 }
 
@@ -278,16 +276,21 @@ private struct Job: Sendable {
 
 struct ContentView: View {
     @StateObject private var studio = Studio()
+    @State private var showInspector = true
+    @State private var dropTargeted = false
 
     var body: some View {
-        HStack(spacing: 0) {
-            controls
-                .frame(width: 392)
+        NavigationStack {
             stage
+                .navigationTitle(navigationTitle)
+                .navigationSubtitle(navigationSubtitle)
+                .toolbar { toolbar }
+                .inspector(isPresented: $showInspector) {
+                    inspector
+                        .inspectorColumnWidth(min: 300, ideal: 340, max: 440)
+                }
         }
-        .preferredColorScheme(.dark)
-        .background(Color.black)
-        .frame(minWidth: 1040, minHeight: 720)
+        .frame(minWidth: 980, minHeight: 640)
         .onAppear { studio.refreshPreview() }
         .onChange(of: studio.markURL) { _, _ in studio.refreshPreview() }
         .onChange(of: studio.sourceURL) { _, _ in
@@ -297,7 +300,10 @@ struct ContentView: View {
         .onChange(of: studio.usesText) { _, _ in studio.refreshPreview() }
         .onChange(of: studio.markText) { _, _ in studio.refreshPreview() }
         .onChange(of: studio.ink) { _, _ in studio.refreshPreview() }
-        .onChange(of: studio.placement) { _, _ in studio.refreshPreview() }
+        .onChange(of: studio.placement) { _, _ in
+            studio.refreshPreview()
+            studio.persist()
+        }
         .onChange(of: studio.opacity) { _, _ in studio.refreshPreview() }
         .onChange(of: studio.scale) { _, _ in studio.refreshPreview() }
         .onChange(of: studio.margin) { _, _ in studio.refreshPreview() }
@@ -311,192 +317,340 @@ struct ContentView: View {
         "\(studio.usesText)\(studio.markText)\(studio.ink.rawValue)\(studio.opacity)\(studio.scale)\(studio.margin)\(studio.jpegQuality)\(studio.shadow)\(studio.keepLocation)\(studio.fit.rawValue)\(studio.fitPixels)"
     }
 
-    private var controls: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 28) {
-                    HStack(spacing: 14) {
-                        Image(systemName: "seal.fill")
-                            .font(.title3)
-                            .foregroundStyle(inkTint)
-                            .frame(width: 44, height: 44)
-                            .background(Circle().fill(inkTint.opacity(0.16)))
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Copyright Inserter")
-                                .font(.system(size: 22, weight: .semibold, design: .serif))
-                            Text("Signature visuelle")
-                                .font(.caption)
+    private var hasPreview: Bool {
+        studio.markedPreview != nil || studio.plainPreview != nil
+    }
+
+    private var navigationTitle: String {
+        let files = studio.files
+        guard !files.isEmpty else { return "Copyright Inserter" }
+        let index = min(studio.photoIndex, files.count - 1)
+        return files[index].deletingPathExtension().lastPathComponent
+    }
+
+    private var navigationSubtitle: String {
+        if studio.comparing { return "Original" }
+        if !studio.outputCaption.isEmpty { return studio.outputCaption }
+        return "Signature visuelle"
+    }
+
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        if studio.revealURL != nil, !studio.isRunning {
+            ToolbarItem(placement: .secondaryAction) {
+                Button(action: studio.reveal) {
+                    Label("Révéler", systemImage: "folder")
+                }
+                .help("Afficher les copies dans le Finder")
+            }
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button(action: studio.apply) {
+                Label(studio.isRunning ? "Signature…" : "Poser la marque", systemImage: "checkmark.seal")
+                    .symbolEffect(.pulse, isActive: studio.isRunning)
+            }
+            .buttonStyle(.glassProminent)
+            .disabled(!studio.canApply)
+            .keyboardShortcut(.return, modifiers: .command)
+            .help("Pose la marque sur chaque image du dossier")
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                showInspector.toggle()
+            } label: {
+                Label("Inspecteur", systemImage: "sidebar.trailing")
+            }
+            .keyboardShortcut("i", modifiers: .command)
+            .help("Afficher l’inspecteur")
+        }
+    }
+
+    @ViewBuilder
+    private var stage: some View {
+        if hasPreview {
+            canvas.safeAreaBar(edge: .bottom) { transport }
+        } else {
+            canvas
+        }
+    }
+
+    private var canvas: some View {
+        ZStack {
+            Color(nsColor: .underPageBackgroundColor)
+                .ignoresSafeArea()
+            if let image = studio.comparing ? studio.plainPreview : studio.markedPreview {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .shadow(color: .black.opacity(0.16), radius: 22, y: 10)
+                    .overlay {
+                        GeometryReader { geo in
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .gesture(dragGesture(in: geo.size))
+                        }
+                    }
+                    .padding(40)
+            } else {
+                placeholder
+            }
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(Color.accentColor, lineWidth: 2.5)
+                    .padding(16)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+            guard let provider = providers.first else { return false }
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                DispatchQueue.main.async { acceptDrop(url) }
+            }
+            return true
+        }
+    }
+
+    private var placeholder: some View {
+        Group {
+            if studio.sourceURL == nil {
+                ContentUnavailableView {
+                    Label("Aucune photo", systemImage: "photo.on.rectangle.angled")
+                } description: {
+                    Text("Glisse un dossier de photos ici, puis une marque ou une ligne de texte.")
+                } actions: {
+                    Button("Choisir un dossier") {
+                        if let url = choose(image: false) { studio.sourceURL = url }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                }
+            } else if studio.files.isEmpty {
+                ContentUnavailableView(
+                    "Aucune image",
+                    systemImage: "photo.badge.exclamationmark",
+                    description: Text("Ce dossier ne contient pas d’image reconnue.")
+                )
+            } else {
+                ContentUnavailableView(
+                    "Aperçu indisponible",
+                    systemImage: "seal",
+                    description: Text(studio.status)
+                )
+            }
+        }
+    }
+
+    private var transport: some View {
+        HStack(spacing: 14) {
+            Button { studio.step(-1) } label: {
+                Image(systemName: "chevron.left")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.large)
+            .disabled(studio.files.count < 2)
+            .keyboardShortcut(.leftArrow, modifiers: .command)
+            .help("Photo précédente")
+
+            Text(counter)
+                .font(.body.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 72)
+
+            Button { studio.step(1) } label: {
+                Image(systemName: "chevron.right")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.large)
+            .disabled(studio.files.count < 2)
+            .keyboardShortcut(.rightArrow, modifiers: .command)
+            .help("Photo suivante")
+
+            Spacer(minLength: 12)
+
+            if studio.isRunning {
+                ProgressView(value: studio.progress)
+                    .progressViewStyle(.linear)
+                    .frame(width: 140)
+                Text(studio.status)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Label(studio.comparing ? "Original" : "Comparer", systemImage: studio.comparing ? "photo" : "eye")
+                .font(.body)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .foregroundStyle(studio.comparing ? .white : .primary)
+                .background(studio.comparing ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.quaternary), in: Capsule())
+                .contentShape(Capsule())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { _ in studio.comparing = true }
+                        .onEnded { _ in studio.comparing = false }
+                )
+                .help("Maintenir pour voir l’original")
+                .opacity(studio.plainPreview == nil ? 0.4 : 1)
+                .allowsHitTesting(studio.plainPreview != nil)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+    }
+
+    private var inspector: some View {
+        Form {
+            Section {
+                Picker("Marque", selection: $studio.usesText) {
+                    Text("Image").tag(false)
+                    Text("Texte").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                if studio.usesText {
+                    TextField("Texte", text: $studio.markText, prompt: Text("© Ton nom"))
+                    Picker("Encre", selection: $studio.ink) {
+                        ForEach(MarkInk.allCases) { ink in
+                            Text(ink.title).tag(ink)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                } else {
+                    fileRow(
+                        title: "Fichier",
+                        symbol: "seal",
+                        value: studio.markURL?.lastPathComponent ?? "Choisir…",
+                        directories: false
+                    ) {
+                        if let url = choose(image: true) { studio.markURL = url }
+                    } onDrop: { url in
+                        guard !directory(url) else { return }
+                        studio.usesText = false
+                        studio.markURL = url
+                    }
+                }
+            } header: {
+                Text("Marque")
+            } footer: {
+                Text(studio.usesText
+                    ? "Une ligne, composée sur la photo."
+                    : "PNG avec transparence, de préférence. Tu peux aussi déposer le fichier.")
+            }
+
+            Section {
+                fileRow(
+                    title: "Photos",
+                    symbol: "photo.stack",
+                    value: studio.sourceURL?.lastPathComponent ?? "Choisir…",
+                    directories: true
+                ) {
+                    if let url = choose(image: false) { studio.sourceURL = url }
+                } onDrop: { url in
+                    guard directory(url) else { return }
+                    studio.sourceURL = url
+                }
+                fileRow(
+                    title: "Destination",
+                    symbol: "folder",
+                    value: studio.destinationURL?.lastPathComponent ?? "À côté des originaux",
+                    directories: true
+                ) {
+                    if let url = choose(image: false) { studio.destinationURL = url }
+                } onDrop: { url in
+                    guard directory(url) else { return }
+                    studio.destinationURL = url
+                }
+                if studio.destinationURL != nil {
+                    Button("Revenir aux copies c_") { studio.destinationURL = nil }
+                }
+            } header: {
+                Text("Dossiers")
+            } footer: {
+                Text(studio.destinationURL == nil
+                    ? "Sans dossier de destination, les copies prennent le préfixe c_."
+                    : "Les fichiers gardent leur nom dans ce dossier. Les originaux ne sont pas modifiés.")
+            }
+
+            Section {
+                Picker("Format", selection: $studio.fit) {
+                    Text("Original").tag(FitAxis.original)
+                    Text("Largeur").tag(FitAxis.width)
+                    Text("Hauteur").tag(FitAxis.height)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                if studio.fit != .original {
+                    LabeledContent(studio.fit == .width ? "Largeur" : "Hauteur") {
+                        HStack(spacing: 6) {
+                            TextField(
+                                "1200",
+                                value: $studio.fitPixels,
+                                format: IntegerFormatStyle<Int>.number.grouping(.never)
+                            )
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 72)
+                            Text("px")
                                 .foregroundStyle(.secondary)
                         }
                     }
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        sectionTitle("seal", "Marque")
-                        HStack(spacing: 8) {
-                            modeButton("Image", "photo", selected: !studio.usesText) { studio.usesText = false }
-                            modeButton("Texte", "textformat", selected: studio.usesText) { studio.usesText = true }
-                        }
-
-                        if studio.usesText {
-                            textMark
-                        } else {
-                            DropWell(
-                                title: studio.markURL?.lastPathComponent ?? "Graphisme",
-                                detail: studio.markURL == nil ? "Glisse un fichier, ou clique" : "Remplacer",
-                                systemImage: "seal",
-                                filled: studio.markURL != nil
-                            ) {
-                                if let url = choose(image: true) { studio.markURL = url }
-                            } onDropURL: { url in
-                                guard !url.hasDirectoryPath else { return }
-                                studio.markURL = url
-                            }
-                        }
+                    Picker("Préréglage", selection: $studio.fitPixels) {
+                        Text("800").tag(800)
+                        Text("1200").tag(1200)
+                        Text("1600").tag(1600)
+                        Text("1920").tag(1920)
                     }
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        sectionTitle("folder", "Dossiers")
-                        DropWell(
-                            title: studio.sourceURL?.lastPathComponent ?? "Photos",
-                            detail: studio.sourceURL == nil ? "Dossier à signer" : "\(studio.files.count) images",
-                            systemImage: "photo.stack",
-                            filled: studio.sourceURL != nil
-                        ) {
-                            if let url = choose(image: false) { studio.sourceURL = url }
-                        } onDropURL: { url in
-                            guard directory(url) else { return }
-                            studio.sourceURL = url
-                        }
-                        DropWell(
-                            title: studio.destinationURL?.lastPathComponent ?? "À côté des originaux",
-                            detail: studio.destinationURL == nil ? "Les copies prennent le préfixe c_" : "Dossier de destination",
-                            systemImage: "square.and.arrow.down",
-                            filled: studio.destinationURL != nil
-                        ) {
-                            if let url = choose(image: false) { studio.destinationURL = url }
-                        } onDropURL: { url in
-                            guard directory(url) else { return }
-                            studio.destinationURL = url
-                        }
-                        if studio.destinationURL != nil {
-                            Button("Revenir aux copies c_") { studio.destinationURL = nil }
-                                .buttonStyle(.link)
-                                .font(.caption)
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        sectionTitle("aspectratio", "Format")
-                        HStack(spacing: 8) {
-                            formatButton("Original", "photo", .original)
-                            formatButton("Largeur", "arrow.left.and.right", .width)
-                            formatButton("Hauteur", "arrow.up.and.down", .height)
-                        }
-                        if studio.fit != .original {
-                            HStack(spacing: 8) {
-                                TextField("1200", value: $studio.fitPixels, format: IntegerFormatStyle<Int>.number.grouping(.never))
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 84)
-                                Text("px")
-                                    .foregroundStyle(.secondary)
-                                Spacer(minLength: 4)
-                                ForEach([800, 1200, 1600, 1920], id: \.self) { value in
-                                    Button("\(value)") { studio.fitPixels = value }
-                                        .buttonStyle(.plain)
-                                        .font(.caption.weight(studio.fitPixels == value ? .semibold : .regular))
-                                        .foregroundStyle(studio.fitPixels == value ? inkTint : .secondary)
-                                }
-                            }
-                        }
-                        Text(formatHint)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        sectionTitle("square.grid.3x3", "Position")
-                        PositionPad(placement: $studio.placement)
-                    }
-
-                    VStack(alignment: .leading, spacing: 16) {
-                        sectionTitle("slider.horizontal.3", "Réglages")
-                        slider("circle.lefthalf.filled", "Opacité", $studio.opacity, 0.15...1)
-                        slider("arrow.up.left.and.arrow.down.right", "Taille", $studio.scale, 0.08...0.7)
-                        slider("square.dashed", "Marge", $studio.margin, 0...0.16)
-                        slider("sparkle", "Qualité JPEG", $studio.jpegQuality, 0.5...1)
-                        iconToggle("shadow", "Ombre portée", $studio.shadow)
-                        iconToggle(studio.keepLocation ? "location.fill" : "location.slash", "Conserver le GPS", $studio.keepLocation)
-                        Text(studio.keepLocation ? "Les coordonnées restent dans les copies." : "Les coordonnées sont retirées des copies. Utile avant une publication.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
                 }
-                .padding(28)
+            } header: {
+                Text("Format")
+            } footer: {
+                Text(formatHint)
             }
 
-            Divider()
-            VStack(alignment: .leading, spacing: 12) {
-                Button(action: studio.apply) {
-                    Label(studio.isRunning ? "Signature…" : "Poser la marque", systemImage: studio.isRunning ? "hourglass" : "checkmark.seal.fill")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(!studio.canApply)
-                .keyboardShortcut(.return, modifiers: .command)
+            Section {
+                PositionPad(placement: $studio.placement)
+            } header: {
+                Text("Position")
+            } footer: {
+                Text("Neuf positions, ou un glisser sur l’aperçu.")
+            }
 
+            Section {
+                percentSlider("Opacité", $studio.opacity, 0.15...1)
+                percentSlider("Taille", $studio.scale, 0.08...0.7)
+                percentSlider("Marge", $studio.margin, 0...0.16)
+                percentSlider("Qualité JPEG", $studio.jpegQuality, 0.5...1)
+                Toggle("Ombre portée", isOn: $studio.shadow)
+                Toggle("Conserver le GPS", isOn: $studio.keepLocation)
+            } header: {
+                Text("Réglages")
+            } footer: {
+                Text(studio.keepLocation
+                    ? "Les coordonnées restent dans les copies."
+                    : "Les coordonnées sont retirées des copies. Utile avant une publication.")
+            }
+
+            Section {
                 if studio.progressVisible {
                     ProgressView(value: studio.progress)
-                        .progressViewStyle(.linear)
                 }
-
-                HStack(alignment: .firstTextBaseline) {
-                    Text(studio.status)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 8)
-                    if studio.revealURL != nil, !studio.isRunning {
-                        Button(action: studio.reveal) {
-                            Label("Révéler", systemImage: "folder")
-                        }
-                        .buttonStyle(.link)
-                    }
-                }
+                Text(studio.status)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(20)
         }
-        .background(Color(red: 0.09, green: 0.09, blue: 0.1))
+        .formStyle(.grouped)
     }
 
-    private var textMark: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            TextField("© Ton nom", text: $studio.markText)
-                .textFieldStyle(.plain)
-                .font(.system(size: 22, weight: .regular, design: .serif))
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(nsColor: .textBackgroundColor)))
-                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.secondary.opacity(0.2)))
-            HStack(spacing: 8) {
-                ForEach(MarkInk.allCases) { ink in
-                    Button {
-                        studio.ink = ink
-                    } label: {
-                        Text(ink.title)
-                            .font(.caption.weight(.medium))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(
-                                Capsule().fill(studio.ink == ink ? inkTint.opacity(0.18) : Color.secondary.opacity(0.08))
-                            )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
+    private var counter: String {
+        let count = studio.files.count
+        guard count > 0 else { return "—" }
+        return "\(studio.photoIndex + 1) / \(count)"
     }
 
     private var formatHint: String {
@@ -510,119 +664,59 @@ struct ContentView: View {
         }
     }
 
-    private var stage: some View {
-        GeometryReader { geo in
-            ZStack {
-                LinearGradient(
-                    colors: [Color(red: 0.07, green: 0.07, blue: 0.08), Color(red: 0.13, green: 0.12, blue: 0.11)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                RadialGradient(
-                    colors: [inkTint.opacity(0.14), .clear],
-                    center: .center,
-                    startRadius: 10,
-                    endRadius: 460
-                )
-                if let image = studio.comparing ? studio.plainPreview : studio.markedPreview {
-                    Image(nsImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                        .shadow(color: .black.opacity(0.16), radius: 28, y: 16)
-                        .padding(.horizontal, 48)
-                        .padding(.top, 36)
-                        .padding(.bottom, 92)
-                        .overlay(alignment: .top) {
-                            if !studio.outputCaption.isEmpty {
-                                Text(studio.outputCaption)
-                                    .font(.caption.monospacedDigit().weight(.medium))
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
-                                    .background(.ultraThinMaterial, in: Capsule())
-                                    .padding(.top, 48)
-                            }
-                        }
-                } else {
-                    VStack(spacing: 16) {
-                        HStack(spacing: 18) {
-                            emptyIcon("photo.stack")
-                            emptyIcon("seal")
-                            emptyIcon("textformat")
-                        }
-                        Text("L'aperçu se pose ici")
-                            .font(.system(.title3, design: .serif))
-                        Text("Glisse un dossier de photos, puis une marque ou une ligne de texte.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .frame(maxWidth: 320)
-                    }
+    private func fileRow(
+        title: String,
+        symbol: String,
+        value: String,
+        directories: Bool,
+        choose: @escaping () -> Void,
+        onDrop: @escaping (URL) -> Void
+    ) -> some View {
+        Button(action: choose) {
+            LabeledContent {
+                Text(value)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } label: {
+                Label(title, systemImage: symbol)
+            }
+        }
+        .buttonStyle(.plain)
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            guard let provider = providers.first else { return false }
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                DispatchQueue.main.async {
+                    let isDirectory = directory(url)
+                    guard isDirectory == directories else { return }
+                    onDrop(url)
                 }
             }
-            .frame(width: geo.size.width, height: geo.size.height)
-            .contentShape(Rectangle())
-            .gesture(dragGesture(in: geo.size))
-            .overlay(alignment: .bottom) { stageBar }
+            return true
         }
     }
 
-    private var stageBar: some View {
-        HStack(spacing: 14) {
-            HStack(spacing: 4) {
-                stageButton("chevron.left") { studio.step(-1) }
-                Text(counter)
-                    .font(.callout.monospacedDigit())
+    private func percentSlider(_ title: String, _ value: Binding<Double>, _ range: ClosedRange<Double>) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            LabeledContent(title) {
+                Text("\(Int((value.wrappedValue * 100).rounded())) %")
+                    .monospacedDigit()
                     .foregroundStyle(.secondary)
-                    .frame(minWidth: 72)
-                stageButton("chevron.right") { studio.step(1) }
             }
-            Spacer()
-            Label(studio.comparing ? "Original" : "Marqué", systemImage: studio.comparing ? "photo" : "seal")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-            Label("Comparer", systemImage: "eye")
-                .font(.callout.weight(.medium))
-                .padding(.horizontal, 14)
-                .padding(.vertical, 7)
-                .background(.ultraThinMaterial, in: Capsule())
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { _ in studio.comparing = true }
-                        .onEnded { _ in studio.comparing = false }
-                )
+            Slider(value: value, in: range)
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 12)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .padding(22)
-    }
-
-    private var counter: String {
-        let count = studio.files.count
-        guard count > 0 else { return "—" }
-        return "\(studio.photoIndex + 1) / \(count)"
-    }
-
-    private func stageButton(_ symbol: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .frame(width: 28, height: 28)
-        }
-        .buttonStyle(.borderless)
-        .disabled(studio.files.count < 2)
+        .padding(.vertical, 2)
     }
 
     private func dragGesture(in viewSize: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 6)
             .onChanged { value in
                 guard let image = studio.markedPreview, !studio.comparing else { return }
-                let canvas = CGSize(width: max(1, viewSize.width - 96), height: max(1, viewSize.height - 128))
-                let fitted = fittedRect(imageSize: image.size, in: canvas)
-                guard fitted.width > 1 else { return }
-                let x = (value.location.x - 48 - fitted.minX) / fitted.width
-                let y = (value.location.y - 36 - fitted.minY) / fitted.height
+                let fitted = fittedRect(imageSize: image.size, in: viewSize)
+                guard fitted.width > 1, fitted.height > 1 else { return }
+                let x = (value.location.x - fitted.minX) / fitted.width
+                let y = (value.location.y - fitted.minY) / fitted.height
                 studio.placement = .manual(x: min(0.98, max(0, x)), y: min(0.98, max(0, y)))
             }
     }
@@ -633,85 +727,6 @@ struct ContentView: View {
         let width = imageSize.width * scale
         let height = imageSize.height * scale
         return CGRect(x: (viewSize.width - width) / 2, y: (viewSize.height - height) / 2, width: width, height: height)
-    }
-
-    private func sectionTitle(_ symbol: String, _ title: String) -> some View {
-        Label(title, systemImage: symbol)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .labelStyle(.titleAndIcon)
-    }
-
-    private func modeButton(_ title: String, _ symbol: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 6) {
-                Image(systemName: symbol)
-                    .font(.body)
-                Text(title)
-                    .font(.caption.weight(.medium))
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
-            .foregroundStyle(selected ? inkTint : .secondary)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(selected ? inkTint.opacity(0.14) : Color.white.opacity(0.04))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(selected ? inkTint.opacity(0.7) : Color.white.opacity(0.06), lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func formatButton(_ title: String, _ symbol: String, _ axis: FitAxis) -> some View {
-        let selected = studio.fit == axis
-        return Button { studio.fit = axis } label: {
-            VStack(spacing: 6) {
-                Image(systemName: symbol)
-                Text(title)
-                    .font(.caption2.weight(.medium))
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
-            .foregroundStyle(selected ? inkTint : .secondary)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(selected ? inkTint.opacity(0.14) : Color.white.opacity(0.04))
-            )
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func iconToggle(_ symbol: String, _ title: String, _ isOn: Binding<Bool>) -> some View {
-        Toggle(isOn: isOn) {
-            Label(title, systemImage: symbol)
-        }
-        .toggleStyle(.switch)
-    }
-
-    private func emptyIcon(_ symbol: String) -> some View {
-        Image(systemName: symbol)
-            .font(.title3)
-            .foregroundStyle(inkTint)
-            .frame(width: 52, height: 52)
-            .background(Circle().fill(Color.white.opacity(0.05)))
-            .overlay(Circle().strokeBorder(Color.white.opacity(0.08)))
-    }
-
-    private func slider(_ symbol: String, _ title: String, _ value: Binding<Double>, _ range: ClosedRange<Double>) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Label(title, systemImage: symbol)
-                Spacer()
-                Text("\(Int((value.wrappedValue * 100).rounded())) %")
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            .font(.callout)
-            Slider(value: value, in: range)
-        }
     }
 
     private func choose(image: Bool) -> URL? {
@@ -729,49 +744,13 @@ struct ContentView: View {
         var isDirectory: ObjCBool = false
         return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
-}
 
-private struct DropWell: View {
-    var title: String
-    var detail: String
-    var systemImage: String
-    var filled: Bool
-    var choose: () -> Void
-    var onDropURL: (URL) -> Void
-    @State private var targeted = false
-
-    var body: some View {
-        Button(action: choose) {
-            HStack(spacing: 12) {
-                Image(systemName: systemImage)
-                    .font(.body)
-                    .frame(width: 34, height: 34)
-                    .background(Circle().fill(filled ? inkTint.opacity(0.16) : Color.secondary.opacity(0.1)))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.callout.weight(.medium)).lineLimit(1)
-                    Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(targeted ? inkTint.opacity(0.1) : Color(nsColor: .textBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(targeted ? inkTint : Color.secondary.opacity(0.18), style: StrokeStyle(lineWidth: 1, dash: filled ? [] : [4, 4]))
-            )
-        }
-        .buttonStyle(.plain)
-        .onDrop(of: [.fileURL], isTargeted: $targeted) { providers in
-            guard let provider = providers.first else { return false }
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                guard let url else { return }
-                DispatchQueue.main.async { onDropURL(url) }
-            }
-            return true
+    private func acceptDrop(_ url: URL) {
+        if directory(url) {
+            studio.sourceURL = url
+        } else {
+            studio.usesText = false
+            studio.markURL = url
         }
     }
 }
@@ -786,29 +765,20 @@ private struct PositionPad: View {
     ]
 
     var body: some View {
-        HStack(spacing: 16) {
-            LazyVGrid(columns: Array(repeating: GridItem(.fixed(36), spacing: 6), count: 3), spacing: 6) {
-                ForEach(anchors) { anchor in
-                    Button { placement = .preset(anchor) } label: {
-                        Image(systemName: symbol(anchor))
-                            .font(.caption.weight(.semibold))
-                            .frame(width: 36, height: 32)
-                            .foregroundStyle(isSelected(anchor) ? Color.black : .secondary)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(isSelected(anchor) ? inkTint : Color.white.opacity(0.05))
-                            )
+        HStack(alignment: .center, spacing: 14) {
+            Grid(horizontalSpacing: 5, verticalSpacing: 5) {
+                ForEach(0..<3, id: \.self) { row in
+                    GridRow {
+                        ForEach(0..<3, id: \.self) { column in
+                            cell(anchors[row * 3 + column])
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .help(anchor.title)
                 }
             }
-            .padding(8)
-            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.white.opacity(0.04)))
             Text(label)
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            Spacer()
+            Spacer(minLength: 0)
         }
     }
 
@@ -817,6 +787,29 @@ private struct PositionPad: View {
         case .preset(let anchor): return anchor.title
         case .manual: return "Placement libre"
         }
+    }
+
+    @ViewBuilder
+    private func cell(_ anchor: Anchor) -> some View {
+        if isSelected(anchor) {
+            button(anchor).buttonStyle(.borderedProminent)
+        } else {
+            button(anchor).buttonStyle(.bordered)
+        }
+    }
+
+    private func button(_ anchor: Anchor) -> some View {
+        Button {
+            placement = .preset(anchor)
+        } label: {
+            Image(systemName: symbol(anchor))
+                .font(.system(size: 11, weight: .semibold))
+                .frame(width: 18, height: 14)
+        }
+        .controlSize(.small)
+        .buttonBorderShape(.roundedRectangle)
+        .help(anchor.title)
+        .accessibilityLabel(anchor.title)
     }
 
     private func isSelected(_ anchor: Anchor) -> Bool {

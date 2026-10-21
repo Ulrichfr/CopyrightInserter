@@ -37,7 +37,7 @@ cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 echo "Compilation"
 swiftc -parse-as-library -O \
   -sdk "$SDK" \
-  -target arm64-apple-macos14 \
+  -target arm64-apple-macos26 \
   -framework SwiftUI \
   -framework AppKit \
   -framework CoreGraphics \
